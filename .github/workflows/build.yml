@@ -1,0 +1,109 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.5'
+          channel: 'stable'
+          cache: true
+
+      - name: Prepare Android folder
+        run: |
+          # احفظ ملفاتنا
+          mkdir -p /tmp/our_files
+          cp android/app/src/main/AndroidManifest.xml /tmp/our_files/AndroidManifest.xml
+          cp android/app/build.gradle                 /tmp/our_files/app_build.gradle
+          cp android/build.gradle                     /tmp/our_files/root_build.gradle
+          cp android/gradle.properties                /tmp/our_files/gradle.properties
+          cp android/settings.gradle                  /tmp/our_files/settings.gradle
+          cp android/gradle/wrapper/gradle-wrapper.properties /tmp/our_files/gradle-wrapper.properties
+          cp -r android/app/src/main/res              /tmp/our_files/res || true
+          # احفظ MainActivity.kt المخصصة (تستخدم FlutterFragmentActivity المطلوبة لـ local_auth)
+          mkdir -p /tmp/our_files/kotlin
+          find android/app/src/main/kotlin -name "MainActivity.kt" -exec cp {} /tmp/our_files/kotlin/ \; || true
+
+          # flutter create لجلب gradlew + kotlin scaffold
+          flutter create --project-name tutor_manager --org com.tutormanager /tmp/scaffold
+
+          # امسح android وجيب scaffold
+          rm -rf android
+          cp -r /tmp/scaffold/android .
+          chmod +x android/gradlew
+
+          # ارجع ملفاتنا
+          cp /tmp/our_files/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          cp /tmp/our_files/app_build.gradle    android/app/build.gradle
+          cp /tmp/our_files/root_build.gradle   android/build.gradle
+          cp /tmp/our_files/gradle.properties   android/gradle.properties
+          cp /tmp/our_files/settings.gradle     android/settings.gradle
+          cp /tmp/our_files/gradle-wrapper.properties android/gradle/wrapper/gradle-wrapper.properties
+          rsync -a /tmp/our_files/res/          android/app/src/main/res/
+          # ارجع MainActivity.kt المخصصة (FlutterFragmentActivity)
+          MAIN_KT=$(find android/app/src/main/kotlin -name "MainActivity.kt" | head -1)
+          if [ -n "$MAIN_KT" ] && [ -f "/tmp/our_files/kotlin/MainActivity.kt" ]; then
+            cp /tmp/our_files/kotlin/MainActivity.kt "$MAIN_KT"
+          fi
+
+          echo "=== Gradle wrapper version in use ==="
+          cat android/gradle/wrapper/gradle-wrapper.properties
+
+          echo "=== MainActivity.kt ==="
+          find android -name "MainActivity.kt" | xargs wc -l
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Accept SDK licenses & install Platform/Build-Tools 35
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
+          SDKMANAGER=$(find "$SDK_ROOT" -name "sdkmanager" | head -1)
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Generate launcher icons
+        run: dart run flutter_launcher_icons
+
+      - name: Verify launcher icon was actually generated (fail fast if missing)
+        run: |
+          if [ ! -f "android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" ]; then
+            echo "❌ ic_launcher.png is missing after flutter_launcher_icons ran."
+            echo "Falling back to manual copy from assets/icon/icon.png"
+            for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+              mkdir -p "android/app/src/main/res/mipmap-$density"
+              cp assets/icon/icon.png "android/app/src/main/res/mipmap-$density/ic_launcher.png"
+            done
+          fi
+          echo "=== Final mipmap contents ==="
+          find android/app/src/main/res -iname "ic_launcher*"
+
+      - name: Build APK (release)
+        run: flutter build apk --debug && flutter build apk --release --no-shrink
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tutor-manager-apk
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/app/outputs/flutter-apk/app-debug.apk
+          retention-days: 30
+          if-no-files-found: error
